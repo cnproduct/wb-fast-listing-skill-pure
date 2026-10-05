@@ -28,3 +28,11 @@ jobs:
         run: |
           python -m playwright install --with-deps chromium
           python tests/check_browser.py
+      - if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $state = Join-Path $env:RUNNER_TEMP 'wb-pure-timer-check'
+          python -m wb_pure --home $state schedule
+          if ($LASTEXITCODE -ne 0) { throw 'Task Scheduler registration failed' }
+          python -m wb_pure --home $state unschedule
+          if ($LASTEXITCODE -ne 0) { throw 'Task Scheduler removal failed' }
