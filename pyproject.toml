@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wb-fast-listing-skill-pure"
+version = "1.0.0"
+description = "Local Ozon CNY capture and verified Wildberries listing"
+requires-python = ">=3.10"
+dependencies = ["playwright>=1.51,<2", "keyring>=25,<26"]
+
+[project.scripts]
+wb-pure = "wb_pure.__main__:entry"
+
+[tool.setuptools.packages.find]
+include = ["wb_pure*"]
