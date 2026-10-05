@@ -183,6 +183,34 @@ class Workflow(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'token_changed'):
             tick(self.state,'other-token')
 
+    def test_windows_schedule_xml_and_rate_limit_checkpoint(self):
+        import types
+        import xml.etree.ElementTree as ET
+        from wb_pure import scheduler
+        with patch.object(scheduler, 'os', types.SimpleNamespace(name='nt')), patch.object(scheduler.subprocess, 'check_output', return_value='PC\\operator'), patch.object(scheduler.subprocess, 'run') as run:
+            scheduler.configure(self.home)
+            xml = ET.parse(self.home / 'task.xml')
+            ns = {'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+            self.assertEqual(xml.find('.//t:Repetition/t:Interval', ns).text, 'PT1M')
+            self.assertEqual(xml.find('.//t:LogonType', ns).text, 'InteractiveToken')
+            self.assertIn('worker --once', xml.find('.//t:Arguments', ns).text)
+            self.assertEqual(run.call_args.args[0][0], 'schtasks')
+        self.new_job()
+        tick(self.state, 'fake', self.now)
+        self.assertEqual(self.state.get(PRODUCT['sku'])['phase'], 'create')
+        original = self.fake.__call__
+        def reject(token, method, base, path, body=None, **kw):
+            if path.endswith('/cards/upload'):
+                wb.BEFORE_WRITE.get()(method, path)
+                raise wb.BusinessError('wb_rate_limited', retry_after=3600)
+            return original(token, method, base, path, body, **kw)
+        with patch.object(wb, 'api', side_effect=reject):
+            tick(self.state, 'fake', self.now+60)
+        job = self.state.get(PRODUCT['sku'])
+        self.assertEqual(job['phase'], 'create')
+        self.assertEqual(job['next_run'], self.now+3660)
+        self.assertIsNone(self.fake.card)
+
     def test_input_boundary_and_dedup(self):
         from wb_pure.__main__ import sku_list
         self.assertEqual(sku_list(['123456789','https://www.ozon.ru/product/test-123456789/']),['123456789'])

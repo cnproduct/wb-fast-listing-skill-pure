@@ -8,7 +8,7 @@ import venv
 from pathlib import Path
 
 
-def main():
+def install():
     if sys.version_info < (3, 10):
         raise SystemExit('Python 3.10+ required. Install Python from https://www.python.org/downloads/')
     p = argparse.ArgumentParser()
@@ -25,8 +25,9 @@ def main():
     for name in ('pyproject.toml', 'SKILL.md', 'README.md'):
         shutil.copy2(source / name, package / name)
     runtime = target / 'venv'
-    venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt").create(runtime)
     python = runtime / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    if not python.exists():
+        venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt").create(runtime)
     subprocess.run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', str(package)], check=True)
     if not args.no_browser:
         subprocess.run([str(python), '-m', 'playwright', 'install', 'chromium'], check=True)
@@ -49,4 +50,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    from wb_pure.state import home_dir, lock
+    with lock(home_dir()):
+        install()
