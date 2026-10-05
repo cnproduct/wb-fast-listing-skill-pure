@@ -226,6 +226,9 @@ def main(argv=None):
 
 
 def entry():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     try:
         main()
     except KeyboardInterrupt:

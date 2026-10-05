@@ -9,6 +9,10 @@ from pathlib import Path
 
 
 def install():
+    os.environ['PYTHONUTF8'] = '1'
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     if sys.version_info < (3, 10):
         raise SystemExit('Python 3.10+ required. Install Python from https://www.python.org/downloads/')
     p = argparse.ArgumentParser()
