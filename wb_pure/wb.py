@@ -21,6 +21,7 @@ PRICES = "https://discounts-prices-api.wildberries.ru"
 MARKET = "https://marketplace-api.wildberries.ru"
 COMMON = "https://common-api.wildberries.ru"
 CATEGORY_POLICY = 2
+LISTING_BRAND = 'generic'
 
 
 def clean_title_and_text(text, sku=""):
@@ -34,7 +35,7 @@ def clean_title_and_text(text, sku=""):
 
 
 def strip_brand(text, brand):
-    # Remove known brand tokens from copy, retaining factual WB brand metadata.
+    # Source brands are used only to remove known tokens from listing copy.
     if category_name(brand) not in ('нет бренда', 'без бренда', 'no brand', '无品牌'):
         text = re.sub(r'(?<!\w)' + re.escape(brand) + r'(?!\w)', '', text, flags=re.I)
     return re.sub(r'\s+', ' ', text).strip(' ,;:-')
@@ -128,14 +129,11 @@ def verify_card_category(card, plan):
         raise BusinessError('category_readback_mismatch')
 
 
-def source_brand(product):
+def source_brands(product):
     values = [product.get('source_brand')] + [v for k, v in product.get('properties', {}).items()
                                             if category_name(k) in ('бренд', 'brand', '品牌')]
     brands = {category_name(v): str(v).strip() for v in values if isinstance(v, str) and v.strip()}
-    if product.get('source_brand_conflict') or len(brands) != 1 or len(next(iter(brands.values()), '')) > 100:
-        raise BusinessError('brand_unverified')
-    # Missing evidence must never be converted to an invented unbranded product.
-    return next(iter(brands.values()))
+    return list(brands.values())
 
 
 def photos_ready(card, plan):
@@ -258,8 +256,12 @@ def prepare(token, product, stock, subject=None, multiplier=5, costs=None, polic
         raise BusinessError("missing_product_evidence")
     dims = {k: positive(product.get(k + "_cm")) for k in ("length", "width", "height")}
     weight = positive(product.get("weight_g")) / 1000
-    brand = source_brand(product)
-    title = strip_brand(clean_title_and_text(product.get("title", ""), product["sku"]), brand)[:60].strip()
+    title = clean_title_and_text(product.get("title", ""), product["sku"])
+    description = clean_title_and_text(product.get("description") or title, product["sku"])
+    for brand in source_brands(product):
+        title = strip_brand(title, brand)
+        description = strip_brand(description, brand)
+    title = title[:60].strip()
     if len(title) < 5 or not product.get("photos"):
         raise BusinessError("missing_product_facts")
     photos = list(dict.fromkeys(image_url(u) for u in product["photos"]))[:30]
@@ -294,10 +296,9 @@ def prepare(token, product, stock, subject=None, multiplier=5, costs=None, polic
         pricing = build_price_plan(price, multiplier, costs)
     except ValueError as exc:
         raise BusinessError(str(exc)) from None
-    description = strip_brand(clean_title_and_text(product.get("description") or title, product["sku"]), brand)[:1900]
     return {"sku": product["sku"], "stock": stock, "photos": photos, **pricing,
             "subjectID": subject, "category_policy_version": CATEGORY_POLICY, "category_source": category_source,
-            "title": title, "description": description, "brand": brand,
+            "title": title, "description": description[:1900], "brand": LISTING_BRAND,
             "dimensions": {**{k: math.ceil(v) for k, v in dims.items()}, "weightBrutto": math.ceil(weight * 1000) / 1000},
             "characteristics": chars, "size": product.get("wb_size", {})}
 
@@ -444,6 +445,8 @@ def step(token, job, phase):
     if phase == "create":
         if card_lookup(token, vendor):
             raise BusinessError("existing_card_requires_review")
+        # Apply the current policy to cached plans before journaling a new card.
+        plan['brand'] = LISTING_BRAND
         variant = {k: plan[k] for k in ("title", "description", "brand", "dimensions", "characteristics")}
         variant.update({"vendorCode": vendor, "sizes": [{**plan.get("size", {}), "skus": [job["barcode"]]}]})
         api(token, "POST", CONTENT, "/content/v2/cards/upload", [{"subjectID": plan["subjectID"], "variants": [variant]}])

@@ -73,6 +73,7 @@ def approve(state, skus):
         if job['phase'] == 'prepared':
             if now - job['product']['captured_at'] > 86400:
                 raise ValueError('capture_expired')
+            job['plan']['brand'] = wb.LISTING_BRAND
             job.update(approved=True, phase='allocate', next_run=now, phase_started=now)
             state.save(job)
 

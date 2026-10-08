@@ -113,8 +113,9 @@ class Workflow(unittest.TestCase):
     def test_full_pipeline_restart_and_next_day(self):
         job = self.new_job()
         self.assertEqual(job['plan']['title'], 'Стальная кухонная подставка')
-        self.assertEqual(job['plan']['brand'], 'Acme')
+        self.assertEqual(job['plan']['brand'], 'generic')
         first = self.complete()
+        self.assertEqual(self.fake.card['brand'], 'generic')
         self.assertEqual((first['phase'],first['actual_price_cny'],first['actual_discount']), ('written',350,30))
         self.state.db.close()
         self.state = State(self.home)
@@ -157,7 +158,7 @@ class Workflow(unittest.TestCase):
     def test_native_currency_package_and_category_guards(self):
         for update in ({'currency':'RUB'}, {'green_price':float('nan')}, {'weight_g':None},
                        {'source_evidence':{}}, {'photos':['https://localhost/x']},
-                       {'properties':{'Тип':'Guess'}}, {'source_brand_conflict':True}):
+                       {'properties':{'Тип':'Guess'}}):
             with self.assertRaises((wb.BusinessError,ValueError)):
                 wb.prepare('fake',{**PRODUCT,**update},5)
         mapped = {**PRODUCT, 'properties':{'Тип':'Подставка кухонная','Материал':'сталь'},
@@ -166,6 +167,59 @@ class Workflow(unittest.TestCase):
         self.assertEqual(wb.prepare('fake',mapped,5)['subjectID'],123)
         with self.assertRaises(wb.BusinessError):
             wb.prepare('fake',mapped,5,999)
+
+    def test_generic_brand_for_missing_and_conflicting_source_brands(self):
+        for update in ({'source_brand': ''}, {'source_brand': None},
+                       {'source_brand_conflict': True},
+                       {'properties': {**PRODUCT['properties'], 'Бренд': 'Other'}}):
+            with self.subTest(update=update):
+                plan = wb.prepare('fake', {**PRODUCT, **update}, 5)
+                self.assertEqual(plan['brand'], 'generic')
+        product = {**PRODUCT, 'title': 'Acme Other Стальная кухонная подставка',
+                   'description': 'Acme Other надежная подставка',
+                   'properties': {**PRODUCT['properties'], 'Бренд': 'Other'}}
+        plan = wb.prepare('fake', product, 5)
+        self.assertEqual(plan['title'], 'Стальная кухонная подставка')
+        self.assertEqual(plan['description'], 'надежная подставка')
+        self.assertEqual(product['source_brand'], 'Acme')
+
+    def test_cached_plan_generic_submission_and_brand_readback(self):
+        job = self.new_job()
+        job['plan']['brand'] = 'Acme'
+        self.state.save(job)
+        self.fake.fail_create = True
+        completed = self.complete()
+        self.assertEqual(completed['phase'], 'written')
+        self.assertEqual(completed['plan']['brand'], 'generic')
+        creates = [c for c in self.fake.calls if c[1].endswith('/cards/upload')]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(creates[0][2][0]['variants'][0]['brand'], 'generic')
+        self.fake.card['brand'] = 'Acme'
+        tick(self.state, 'fake', completed['next_run'] + 1)
+        self.assertEqual(self.state.get(PRODUCT['sku'])['phase'], 'needs_review')
+        self.assertEqual(self.fake.stocks[0]['amount'], 0)
+
+    def test_prepared_plan_approval_uses_generic(self):
+        from wb_pure.__main__ import approve
+        job = self.new_job()
+        job.update(phase='prepared', approved=False, product={'captured_at': time.time()})
+        job['plan']['brand'] = 'Acme'
+        self.state.save(job)
+        approve(self.state, [job['sku']])
+        self.assertEqual(self.state.get(job['sku'])['plan']['brand'], 'generic')
+
+    def test_submitted_legacy_card_keeps_original_brand(self):
+        job = self.new_job()
+        job['plan']['brand'] = 'Acme'
+        job.update(phase='card_pending', barcode='1234567890123')
+        self.state.save(job)
+        self.fake.card = {**copy.deepcopy(job['plan']), 'nmID': 999,
+                          'vendorCode': job['vendor_code'], 'photos': [],
+                          'sizes': [{'skus': [job['barcode']]}]}
+        completed = self.complete()
+        self.assertEqual(completed['phase'], 'written')
+        self.assertEqual(completed['plan']['brand'], 'Acme')
+        self.assertFalse(any(c[1].endswith('/cards/upload') for c in self.fake.calls))
 
     def test_multipliers_floor_dates_and_token_guard(self):
         for m, base, first, final in ((5,500,350,250),(5.5,550,385,275),(6,600,420,300),(10,1000,700,500)):
