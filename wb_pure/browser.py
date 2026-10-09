@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 from .ozon import parse_product, parse_pdp, _text
+from .pricing import SOURCE_PRICE_POLICY, validate_source_price
 
 MAX_HTML = 12 * 1024 * 1024
 
@@ -38,7 +39,7 @@ def from_capture(record):
     pages = record.get('pages', [])
     if len(pages) != 2:
         raise ValueError('two_fresh_pages_required')
-    pdp, features = None, None
+    pdp, features, pdp_page = None, None, None
     for page in pages:
         if sku_id(page['url']) != sku:
             raise ValueError('capture_sku_mismatch')
@@ -51,14 +52,31 @@ def from_capture(record):
             features = page['html']
         else:
             pdp = page['html']
+            pdp_page = page
     if pdp is None or features is None:
         raise ValueError('product_and_features_required')
     result = parse_product(sku, pdp, features)
+    check = record.get('currency_check')
+    if not isinstance(check, dict):
+        raise ValueError('ozon_native_cny_evidence_required')
+    feature_price = parse_pdp(sku, features)
+    has_feature_price = feature_price.get('green_price') is not None or re.search(r'id=["\']state-webPrice-\d+-default-\d+["\']', features)
+    if has_feature_price and feature_price.get('currency') != 'CNY':
+        raise ValueError('ozon_currency_reverted')
+    if has_feature_price and feature_price.get('green_price') != result['product']['green_price']:
+        raise ValueError('ozon_green_price_changed')
+    evidence = {**check, 'version': SOURCE_PRICE_POLICY, 'sku': sku,
+                'captured_at': float(pdp_page['captured_at']),
+                'green_price': result['product'].get('green_price_evidence')}
+    validate_source_price(sku, result['product']['currency'], result['product']['green_price'], evidence)
+    if not all(float(p['captured_at']) >= float(check['refreshed_at']) for p in pages):
+        raise ValueError('capture_before_currency_reload')
+    result['product']['currency_evidence'] = evidence
     result['product']['captured_at'] = min(float(p['captured_at']) for p in pages)
     return result
 
 
-def select_cny(page):
+def currency_dialog(page):
     title = page.get_by_text(re.compile(r'^(Язык и валюта|语言和货币|Language and currency)$')).filter(visible=True)
     if not title.count():
         entry = page.get_by_text(re.compile(r'^(RU|EN|ZH|CN)$')).filter(visible=True)
@@ -71,17 +89,51 @@ def select_cny(page):
               if re.search(r'(?:,|\s)(RUB|CNY|USD|EUR|CHF|BYN|KZT)\s*$', i.locator('..').inner_text())]
     if len(inputs) != 1:
         raise ValueError('ozon_currency_layout_changed')
-    field = inputs[0]
+    return title, dialog, inputs[0]
+
+
+def select_cny(page, after_reload=None):
+    title, dialog, field = currency_dialog(page)
     if not re.search(r'\bCNY\s*$', field.locator('..').inner_text()):
         field.fill('CNY')
         option = page.get_by_text('CNY', exact=True).filter(visible=True)
         option.click(timeout=5000)
     if not re.search(r'\bCNY\s*$', field.locator('..').inner_text()):
         raise ValueError('ozon_currency_unverified')
+    saved = time.time()
     dialog.get_by_role('button', name=re.compile(r'^(Сохранить|保存|Save)$')).click(timeout=5000)
     title.wait_for(state='hidden', timeout=8000)
     page.reload(wait_until='domcontentloaded')
     page.wait_for_timeout(1500)
+    if after_reload:
+        after_reload()
+    # Read the saved preference again after reload; a click alone is insufficient.
+    title, dialog, field = currency_dialog(page)
+    selected = field.locator('..').inner_text()
+    if not re.search(r'\bCNY\s*$', selected):
+        raise ValueError('ozon_currency_reverted')
+    dialog.get_by_role('button', name=re.compile(r'^(Сохранить|保存|Save)$')).click(timeout=5000)
+    title.wait_for(state='hidden', timeout=8000)
+    page.reload(wait_until='domcontentloaded')
+    page.wait_for_timeout(1500)
+    if after_reload:
+        after_reload()
+    return {'currency': 'CNY', 'selected_currency_text': selected,
+            'saved_at': saved, 'refreshed_at': time.time()}
+
+
+def visible_price_text(page, product):
+    evidence = product.get('green_price_evidence')
+    if product.get('currency') != 'CNY' or not evidence:
+        raise ValueError('ozon_native_cny_evidence_required')
+    widgets = page.locator('[data-widget="webPrice"]').filter(visible=True)
+    texts = [w.inner_text() for w in widgets.all()]
+    compact = lambda text: re.sub(r'\s+', '', text)
+    raw = compact(evidence['raw'])
+    matches = [text for text in texts if re.search(r'(?<![\d.,])' + re.escape(raw) + r'(?![\d.,])', compact(text))]
+    if len(matches) != 1:
+        raise ValueError('ozon_visible_green_price_unverified')
+    return matches[0]
 
 
 class Browser:
@@ -127,24 +179,23 @@ class Browser:
         page = self.page
         page.goto(f'https://www.ozon.ru/product/{sku}/', wait_until='domcontentloaded', timeout=45000)
         page.wait_for_timeout(1800)
-        html = self.html()
+        self.html()
         for attempt in range(2):
-            if parse_pdp(sku, html).get('currency') == 'CNY':
-                break
             try:
-                select_cny(page)
-            except Exception:
+                # Always set/save/reload in this browser, including apparently CNY pages.
+                check = select_cny(page, self.html)
+                pdp = {'url': page.url, 'captured_at': time.time(), 'html': self.html()}
+                check['visible_price_text'] = visible_price_text(page, parse_pdp(sku, pdp['html']))
+                break
+            except Exception as exc:
                 if attempt == 1:
+                    if isinstance(exc, ValueError):
+                        raise
                     raise ValueError('ozon_currency_unverified') from None
-            html = self.html()
-        # Reload in the same browser: a menu click alone is not currency evidence.
-        page.reload(wait_until='domcontentloaded')
-        page.wait_for_timeout(1500)
-        pdp = {'url': page.url, 'captured_at': time.time(), 'html': self.html()}
         page.goto(f'https://www.ozon.ru/product/{sku}/features/', wait_until='domcontentloaded', timeout=45000)
         page.wait_for_timeout(1500)
         features = {'url': page.url, 'captured_at': time.time(), 'html': self.html()}
-        record = {'sku': sku, 'pages': [pdp, features]}
+        record = {'sku': sku, 'currency_check': check, 'pages': [pdp, features]}
         result = from_capture(record)
         folder = self.home / 'captures'
         folder.mkdir(exist_ok=True)

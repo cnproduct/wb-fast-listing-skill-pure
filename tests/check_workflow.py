@@ -18,6 +18,10 @@ PRODUCT = dict(sku='123456789', title='Acme Стальная кухонная п
                source_evidence={'dimensions':'Упаковка: 20 x 10 x 5 см', 'weight':'Вес брутто: 450 г'},
                length_cm=20, width_cm=10, height_cm=5, weight_g=450,
                properties={'Тип':'Подставки', 'Материал':'сталь'})
+PRODUCT['currency_evidence'] = {'version': 1, 'sku': PRODUCT['sku'], 'currency': 'CNY',
+    'green_price': {'sku': PRODUCT['sku'], 'currency': 'CNY', 'amount': 100, 'raw': '100 CNY'},
+    'selected_currency_text': 'Китайский юань, CNY', 'visible_price_text': '100 CNY С банками',
+    'saved_at': time.time()-3, 'refreshed_at': time.time()-2, 'captured_at': time.time()-1}
 
 
 class FakeWB:
@@ -167,6 +171,46 @@ class Workflow(unittest.TestCase):
         self.assertEqual(wb.prepare('fake',mapped,5)['subjectID'],123)
         with self.assertRaises(wb.BusinessError):
             wb.prepare('fake',mapped,5,999)
+
+    def test_currency_proof_and_cached_price_plan_guards(self):
+        for changes in ({'currency_evidence': None}, {'green_price': 9999}):
+            with self.assertRaisesRegex(ValueError, 'ozon_native_cny_evidence_required'):
+                wb.prepare('fake', {**PRODUCT, **changes}, 5)
+        for changes in ({'visible_price_text': '9999 ₽ С банками'},
+                        {'selected_currency_text': 'Российский рубль, RUB'},
+                        {'refreshed_at': PRODUCT['currency_evidence']['saved_at']-1}):
+            p = copy.deepcopy(PRODUCT)
+            p['currency_evidence'].update(changes)
+            with self.assertRaises(ValueError):
+                wb.prepare('fake', p, 5)
+        for phase in ('allocate', 'create', 'price', 'stock', 'written', 'reprice_pending'):
+            job = self.new_job()
+            job.update(phase=phase, reprice_at=self.now-1)
+            job['plan'].pop('source_price_evidence')
+            self.state.save(job)
+            calls = len(self.fake.calls)
+            tick(self.state, 'fake', self.now)
+            self.assertEqual(self.state.get(job['sku'])['phase'], 'needs_review')
+            self.assertEqual(len(self.fake.calls), calls)
+        for changes in ({'strike_price': 50000}, {'source_price_cny': 9999},
+                        {'source_currency': 'RUB'}, {'final_discount': 0}):
+            job = self.new_job()
+            job['plan'].update(changes)
+            self.state.save(job)
+            calls = len(self.fake.calls)
+            tick(self.state, 'fake', self.now)
+            self.assertEqual(self.state.get(job['sku'])['phase'], 'needs_review')
+            self.assertEqual(len(self.fake.calls), calls)
+
+    def test_legacy_prepared_plan_cannot_be_approved(self):
+        from wb_pure.__main__ import approve
+        job = self.new_job()
+        job.update(phase='prepared', approved=False, product={'captured_at': time.time()})
+        job['plan'].pop('source_price_evidence')
+        self.state.save(job)
+        with self.assertRaisesRegex(ValueError, 'ozon_native_cny_evidence_required'):
+            approve(self.state, [job['sku']])
+        self.assertFalse(self.state.get(job['sku'])['approved'])
 
     def test_generic_brand_for_missing_and_conflicting_source_brands(self):
         for update in ({'source_brand': ''}, {'source_brand': None},

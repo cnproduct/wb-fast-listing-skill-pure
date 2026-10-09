@@ -46,7 +46,7 @@ def _photo(url: object) -> str | None:
     return re.sub(r"/(?:c|wc)\d+/", "/wc1000/", url)
 
 
-def _currency(value: object) -> str | None:
+def _currencies(value: object) -> list[str]:
     text = str(value or "")
     found = [currency for currency, pattern in {
         "RUB": r"₽|\bруб\b|\bRUB\b",
@@ -56,6 +56,11 @@ def _currency(value: object) -> str | None:
         "JPY": r"\bJPY\b|円",
         "USD": r"\bUSD\b", "EUR": r"\bEUR\b|€", "BYN": r"\bBYN\b",
     }.items() if re.search(pattern, text, re.I)]
+    return found
+
+
+def _currency(value: object) -> str | None:
+    found = _currencies(value)
     # The yen/yuan symbol alone does not establish CNY.
     return found[0] if len(found) == 1 else None
 
@@ -110,13 +115,14 @@ def _price_evidence(sku: str, html: str, single_product: bool) -> tuple:
             # No guessed widget ID: a single price in a same-SKU JSON object is evidence.
             if not identity and identities:
                 identity = next(iter(identities)) if len(prices) == 1 and len(identities) == 1 else "ambiguous"
-            candidates.append((identity, price))
-    selected = [price for identity, price in candidates if identity == sku]
+            candidates.append((identity, price, widget_id))
+    selected = [(identity, price, widget) for identity, price, widget in candidates if identity == sku]
     if not selected and len(candidates) == 1 and not candidates[0][0] and single_product:
         # Existing single-product snapshots have one unlabelled price state.
-        selected = [candidates[0][1]]
+        selected = candidates
     values = set()
-    for price in selected:
+    evidence = []
+    for identity, price, widget in selected:
         raw = price.get("cardPrice")
         currency = _currency(raw)
         declarations = [_currency(price[key]) for key in ("priceCurrency", "currency") if key in price]
@@ -124,8 +130,20 @@ def _price_evidence(sku: str, html: str, single_product: bool) -> tuple:
             explicit = declarations[0] if all(item == declarations[0] for item in declarations) else None
             bare_amount = re.fullmatch(r"[¥￥]?\s*[\d.,\s]+\s*[¥￥]?", str(raw))
             currency = explicit if explicit and (currency == explicit or not currency and bare_amount) else None
+        # A stale CNY declaration must not relabel a RUB price object.
+        for key in ('price', 'originalPrice'):
+            amount = price.get(key)
+            if amount is not None:
+                codes = _currencies(amount)
+                if codes and codes != [currency]:
+                    currency = None
         values.add((_number(raw), _number(price.get("price")), currency or ""))
-    return next(iter(values)) if len(values) == 1 else (None, None, "")
+        if identity == sku and currency == 'CNY':
+            evidence.append({'sku': sku, 'currency': currency, 'raw': str(raw),
+                             'amount': _number(raw), 'widget_id': widget})
+    if len(values) != 1:
+        return None, None, '', None
+    return (*next(iter(values)), evidence[0] if evidence else None)
 
 
 def parse_pdp(sku: str, html: str) -> dict:
@@ -164,10 +182,11 @@ def parse_pdp(sku: str, html: str) -> dict:
             product["regular_price"] = product["regular_price"] or _number(offers.get("price"))
 
     product["source_brand_conflict"] = len(brands) > 1
-    green, regular, currency = _price_evidence(sku, html, single_product and len(products) == 1)
+    green, regular, currency, evidence = _price_evidence(sku, html, single_product and len(products) == 1)
     product["green_price"] = green
     product["regular_price"] = regular or product["regular_price"]
     product["currency"] = currency
+    product['green_price_evidence'] = evidence
 
     if not product["title"]:
         for pattern in (

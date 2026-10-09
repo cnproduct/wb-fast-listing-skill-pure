@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlencode
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
-from .pricing import build_price_plan, minimum_sale, number, POLICY_VERSION
+from .pricing import build_price_plan, minimum_sale, number, POLICY_VERSION, validate_source_price, validate_price_plan
 
 CONTENT = "https://content-api.wildberries.ru"
 PRICES = "https://discounts-prices-api.wildberries.ru"
@@ -249,6 +249,7 @@ def prepare(token, product, stock, subject=None, multiplier=5, costs=None, polic
     if product.get("currency") != "CNY":
         raise BusinessError("switch_ozon_to_cny")
     price = positive(product.get("green_price"))
+    validate_source_price(product['sku'], product['currency'], price, product.get('currency_evidence'))
     store_goods = api(token, "GET", PRICES, "/api/v2/list/goods/filter?limit=1").get("data", {}).get("listGoods", [])
     if store_goods and any(g.get("currencyIsoCode4217") != "CNY" for g in store_goods):
         raise BusinessError("store_currency_mismatch")
@@ -297,6 +298,7 @@ def prepare(token, product, stock, subject=None, multiplier=5, costs=None, polic
     except ValueError as exc:
         raise BusinessError(str(exc)) from None
     return {"sku": product["sku"], "stock": stock, "photos": photos, **pricing,
+            "source_currency": "CNY", "source_price_evidence": product['currency_evidence'],
             "subjectID": subject, "category_policy_version": CATEGORY_POLICY, "category_source": category_source,
             "title": title, "description": description[:1900], "brand": LISTING_BRAND,
             "dimensions": {**{k: math.ceil(v) for k, v in dims.items()}, "weightBrutto": math.ceil(weight * 1000) / 1000},
@@ -416,6 +418,13 @@ def monitor_result(token, job, goods):
 
 def step(token, job, phase):
     plan, vendor = job["plan"], job["vendor_code"]
+    if phase != 'protect':
+        try:
+            validate_price_plan(plan)
+            if job['sku'] != plan['sku']:
+                raise ValueError('source_price_plan_mismatch')
+        except ValueError as exc:
+            raise BusinessError(str(exc)) from None
     if plan.get("pricing_policy_version") != POLICY_VERSION:
         raise BusinessError("update_required")
     validate_category_plan(plan)

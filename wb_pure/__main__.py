@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from . import __version__, wb
 from .browser import Browser, from_capture, sku_id
-from .pricing import vendor_code
+from .pricing import vendor_code, validate_price_plan
 from .state import State, home_dir, lock, save_token, load_token
 from .runner import tick
 
@@ -71,6 +71,7 @@ def approve(state, skus):
         if not job:
             raise ValueError('sku_not_prepared')
         if job['phase'] == 'prepared':
+            validate_price_plan(job['plan'])
             if now - job['product']['captured_at'] > 86400:
                 raise ValueError('capture_expired')
             job['plan']['brand'] = wb.LISTING_BRAND

@@ -121,10 +121,18 @@ $wb = Join-Path $env:USERPROFILE '.local\share\wb-fast-listing-skill-pure\wb-pur
 & $wb start 123456789
 ```
 
-抓取记录仅24小时内有效；过期需重新读取。宿主浏览器替代采集的输入格式：
+抓取记录仅24小时内有效；过期需重新读取。v1.0.2 每个 SKU 必须先在当前浏览器选择 CNY、保存、刷新，再重新打开菜单确认保存的 CNY。程序读取刷新后的本 SKU 原生绿标价，同时核对可见价格区域；不会按汇率计算人民币。价格对象的 CNY 声明与 RUB 普通价/原价冲突时拒绝，规格页价格回退或前后不一致时暂停。
+
+宿主浏览器替代采集也须完成相同操作。以下时间字段填写该操作的真实 Unix 秒，价格原文从当前 SKU 可见的 webPrice 区域实际读取，不能从推荐商品或旧记录复制。商品页及规格页须在刷新完成后采集；商品页采集距离保存不超过10分钟。输入格式：
 
 ```json
-{"sku":"123456789","pages":[
+{"sku":"123456789","currency_check":{
+  "currency":"CNY",
+  "selected_currency_text":"刷新后菜单中实际选中的币种原文，末尾为 CNY",
+  "saved_at":"实际保存Unix秒",
+  "refreshed_at":"实际刷新完成Unix秒",
+  "visible_price_text":"本 SKU 可见价格区域原文，含原生人民币绿标价"
+},"pages":[
   {"url":"https://www.ozon.ru/product/123456789/","captured_at":实际Unix秒,"html":"商品页真实完整DOM"},
   {"url":"https://www.ozon.ru/product/123456789/features/","captured_at":实际Unix秒,"html":"规格页真实完整DOM"}
 ]}
@@ -139,16 +147,22 @@ $wb = Join-Path $env:USERPROFILE '.local\share\wb-fast-listing-skill-pure\wb-pur
 - `wb_unauthorized` 对应401；`wb_permission_denied` 对应403；`wb_rate_limited` 对应429，遵守等待；不能笼统都说令牌过期。令牌需要商品内容、价格折扣、Marketplace库存与卖家资料相应权限。
 - `another_local_operation_is_running`：同店已有本地操作。等待该操作完成，下轮定时器会再试。
 - `ozon_currency_layout_changed` / `ozon_currency_unverified`：页面交互未核实，由助手实际浏览器处理并导出capture，不要求用户猜币种。
+- `ozon_currency_reverted` / `ozon_green_price_changed`：保存、刷新或规格页价格不一致，重新观察当前页面并采集，不继续使用旧数字。
+- `ozon_visible_green_price_unverified` / `ozon_native_cny_evidence_required`：没有核实同 SKU 的原生 CNY 绿标价、可见价格或保存刷新证据。仅把 currency 字段改为 CNY 无效。
+- `source_price_plan_mismatch`：缓存计划与有证据的源价、倍数、划线价、30%/50%折扣不一致，停止自动写入。
 - 新建卡片最多等待2小时；无法确认的任务转待核实，有已暴露库存时尝试保护。
 - 仓库并发写入采用本机锁。不要把同一数据目录同时放在同步盘上由两台电脑执行。
 
 更新：在下载仓库执行 `git pull --ff-only` 后再次运行 `py -3 install.py`（macOS/Linux `python3 install.py`）；先停止前台worker。安装不会清除本地任务和凭据，但旧对话须重新加载本技能说明。
+
+**v1.0.2 旧任务处理**：此前计划没有保存新的币种证明，因此运行检查会将其转为 needs_review，停止继续自动写入和次日调价。更新不能倒推原币种，也不会自动修复历史售价或清零库存。尚未提交的 prepared/blocked 任务重新 capture、prepare；在途或已上架商品先只读 audit 和核对源价，由商家明确确认具体修复清单，不能删除数据库或重复建卡绕过检查。旧版程序、其他账号安装和第三方脚本也须停止使用；本更新无法约束它们的写入。
 
 ## 验证与开发
 
 ```sh
 python3 -m unittest discover -s tests -p 'check_workflow.py'
 PYTHONPATH=. python3 tests/check_ozon.py
+PYTHONPATH=. python3 tests/check_browser.py
 python3 -m wb_pure --help
 ```
 

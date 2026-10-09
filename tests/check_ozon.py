@@ -82,6 +82,10 @@ def main():
         assert unknown["currency"] != "CNY", "unrelated offer currency must not label the green price"
     explicit = parse_pdp("123456789", target + state_html({"sku": "123456789", "cardPrice": "100 ¥", "currency": "CNY"}))
     assert explicit["currency"] == "CNY", "same price object explicitly establishes the ambiguous symbol"
+    for prices in ({'price': '1200 RUB'}, {'originalPrice': '1200 ₽'}, {'price': '1200 CNY RUB'}):
+        stale = parse_pdp('123456789', target + state_html({'sku': '123456789', 'cardPrice': '999', 'currency': 'CNY', **prices}))
+        assert stale['currency'] != 'CNY', 'CNY metadata must not relabel a conflicting RUB price object'
+    assert parse_pdp('123456789', target + state_html({'cardPrice': '100 CNY'}))['green_price_evidence'] is None
     for amount in ("100 RUB", "100 RUB CNY", "100 unknown"):
         conflict = parse_pdp("123456789", target + state_html({"sku": "123456789", "cardPrice": amount, "currency": "CNY"}))
         assert conflict["currency"] == ""

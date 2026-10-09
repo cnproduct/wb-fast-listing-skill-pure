@@ -2,7 +2,7 @@
 import time
 import hashlib
 from . import wb
-from .pricing import next_discount_at
+from .pricing import next_discount_at, validate_price_plan
 
 PENDING = {'/content/v2/cards/upload': 'card_pending',
            '/api/v2/upload/task/club-discount': 'club_pending'}
@@ -23,6 +23,16 @@ def tick(state, token, now=None):
         if not job.get('approved') or job['phase'] in ('blocked', 'needs_review', 'prepared') or job.get('next_run', 0) > now:
             continue
         phase = job['phase']
+        if phase != 'protect':
+            try:
+                validate_price_plan(job['plan'])
+                if job['sku'] != job['plan']['sku']:
+                    raise ValueError('source_price_plan_mismatch')
+            except ValueError as exc:
+                # Legacy/unsafe plans must not trigger automatic price or stock writes.
+                job.update(phase='needs_review', error=str(exc))
+                state.save(job)
+                continue
         if phase in ('allocate', 'create') and now - job.get('product', {}).get('captured_at', job['created_at']) > 86400:
             job.update(phase='needs_review', error='capture_expired')
             state.save(job)
